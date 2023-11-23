@@ -171,7 +171,7 @@ pub const Conn = struct {
 
     pub fn writeCloseWithCode(self: *Conn, code: u16) !void {
         var buf: [2]u8 = undefined;
-        std.mem.writeInt(u16, &buf, code, .Big);
+        std.mem.writeInt(u16, &buf, code, .big);
         return self.writeFrame(.close, &buf);
     }
 
@@ -364,7 +364,7 @@ pub fn readRequest(stream: anytype, buf: []u8, timeout: ?u32) ![]u8 {
             try os.setsockopt(stream.handle, os.SOL.SOCKET, os.SO.RCVTIMEO, &to);
         }
 
-        var n = try stream.read(buf[total..]);
+        const n = try stream.read(buf[total..]);
         if (n == 0) {
             return error.Invalid;
         }
@@ -577,7 +577,7 @@ fn testReadFrames(s: *t.Stream, expected: []Expect) !void {
     defer s.deinit();
 
     // we don't currently use this
-    var context = TestContext{};
+    const context = TestContext{};
 
     // test with various random  TCP fragmentations
     // our t.Stream automatically fragments the frames on the first
