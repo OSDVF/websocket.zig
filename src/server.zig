@@ -1,5 +1,6 @@
 const std = @import("std");
 const lib = @import("lib.zig");
+const trait = @import("zigtrait");
 
 const HandshakePool = @import("handshake.zig").Pool;
 
@@ -121,7 +122,7 @@ fn clientLoop(comptime H: type, context: anytype, net_conn: NetConn, config: *co
     }
 
     defer handler.close();
-    if (comptime std.meta.trait.hasFn("afterInit")(H)) {
+    if (comptime trait.hasFn("afterInit")(H)) {
         handler.afterInit() catch return;
     }
 

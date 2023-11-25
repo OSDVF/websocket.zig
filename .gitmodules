@@ -1,0 +1,3 @@
+[submodule "vendor/zigtrait"]
+	path = vendor/zigtrait
+	url = git@github.com:wrongnull/zigtrait.git
