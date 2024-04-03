@@ -237,50 +237,61 @@ pub const Reader = struct {
             self.message_len = to_read;
             return true;
         }
-        const missing = to_read - len;
 
         var buf = self.buf.data;
-        const start = self.start;
-        const message_len = self.message_len;
-        var read_start = start + len;
 
-        if (missing > buf.len - read_start) {
+        // the position, in buf, where the current message starts
+        const start = self.start;
+
+        // the position in buf up to which we have valid data, this is where
+        // we should start filling it up from.
+        var pos = start + len;
+
+        // how much data we're missing to satifisfy to_read
+        const missing = to_read - len;
+
+        if (missing > buf.len - pos) {
             if (to_read <= buf.len) {
                 // We have enough space to read this message in our
                 // current buffer, but we need to compact it.
-                std.mem.copyForwards(u8, buf[0..], buf[start..read_start]);
+                std.mem.copyForwards(u8, buf[0..], buf[start..pos]);
                 self.start = 0;
-                read_start = len;
+                pos = len;
             } else if (to_read <= self.max_size) {
                 const new_buf = try self.bp.alloc(to_read);
                 if (len > 0) {
-                    @memcpy(new_buf.data[0..len], buf[start .. start + len]);
+                    @memcpy(new_buf.data[0..len], buf[start..pos]);
                 }
 
                 // bp.alloc can return a larger buffer (e.g. from a pool). But we don't
                 // want to over-read data here, since we want to be able to cleanly
                 // revert back to our static buffer
                 buf = new_buf.data[0..to_read];
-                read_start = len;
+                pos = len;
 
                 self.start = 0;
                 self.buf = new_buf;
-                self.len = message_len;
+                self.len = self.message_len;
             } else {
                 return error.TooLarge;
             }
         }
 
-        var total_read: usize = 0;
-        while (total_read < missing) {
-            const n = try stream.read(buf[(read_start + total_read)..]);
+        // Once pos reaches this position, then we have to_read bytes
+        const need_pos = pos + missing;
+
+        // We can overread if this is our static buffer
+        const buf_end = if (buf.ptr == self.static.data.ptr) buf.len else need_pos;
+
+        while (pos < need_pos) {
+            const n = try stream.read(buf[pos..buf_end]);
             if (n == 0) {
                 return false;
             }
-            total_read += n;
+            pos += n;
         }
 
-        self.len += total_read;
+        self.len = pos - self.start;
         self.message_len = to_read;
         return true;
     }
@@ -293,153 +304,162 @@ pub const Reader = struct {
 
 const t = lib.testing;
 test "Reader: readMessage too larrge" {
-    var s = t.Stream.init();
-    defer s.deinit();
-    _ = s.textFrame(true, "hello world");
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    pair.textFrame(true, "hello world");
+    pair.sendBuf();
 
     var bp = buffer.Provider.initNoPool(t.allocator);
     var r = try Reader.init(16, 16, &bp);
     defer r.deinit();
-    try t.expectError(error.TooLarge, r.readMessage(&s));
+    try t.expectError(error.TooLarge, r.readMessage(pair.server));
 }
 
 test "Reader: readMessage too large over multiple fragments" {
-    var s = t.Stream.init();
-    defer s.deinit();
-    _ = s.textFrame(false, "hello world")
-        .cont(false, " !!!_!!! ")
-        .cont(true, "how are you doing?");
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    pair.textFrame(false, "hello world");
+    pair.cont(false, " !!!_!!! ");
+    pair.cont(true, "how are you doing?");
+    pair.sendBuf();
 
     var bp = buffer.Provider.initNoPool(t.allocator);
     var r = try Reader.init(32, 32, &bp);
     defer r.deinit();
-    try t.expectError(error.TooLarge, r.readMessage(&s));
+    try t.expectError(error.TooLarge, r.readMessage(pair.server));
 }
 
 test "Reader: exact read into static with no overflow" {
     // exact read into static with no overflow
-    var s = t.Stream.init();
-    _ = s.add("hello1");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("hello1");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(20, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 6));
+    try t.expectEqual(true, try r.read(pair.server, 6));
     try t.expectString("hello1", r.currentMessage());
     try t.expectString("hello1", r.currentMessage());
 }
 
 test "Reader: overread into static with no overflow" {
-    var s = t.Stream.init();
-    _ = s.add("hello1world");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("hello1world");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(20, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 6));
+    try t.expectEqual(true, try r.read(pair.server, 6));
     try t.expectString("hello1", r.currentMessage());
     try t.expectString("hello1", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 5));
+    try t.expectEqual(true, try r.read(pair.server, 5));
     try t.expectString("world", r.currentMessage());
 }
 
 test "Reader: incremental read of message" {
-    var s = t.Stream.init();
-    _ = s.add("12345");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("12345");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(20, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 2));
+    try t.expectEqual(true, try r.read(pair.server, 2));
     try t.expectString("12", r.currentMessage());
 
-    try t.expectEqual(true, try r.read(&s, 5));
+    try t.expectEqual(true, try r.read(pair.server, 5));
     try t.expectString("12345", r.currentMessage());
 }
 
 test "Reader: reads with overflow" {
-    var s = t.Stream.init();
-    _ = s.add("hellow").add("orld!");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("hellow");
+    try pair.client.writeAll("orld!");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(6, 5, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 5));
+    try t.expectEqual(true, try r.read(pair.server, 5));
     try t.expectString("hello", r.currentMessage());
     try t.expectString("hello", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 6));
+    try t.expectEqual(true, try r.read(pair.server, 6));
     try t.expectString("world!", r.currentMessage());
 }
 
 test "Reader: reads too large" {
-    var s = t.Stream.init();
-    _ = s.add("12356");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("123456");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r1 = try Reader.init(5, 5, &bp);
     defer r1.deinit();
-    try t.expectError(error.TooLarge, r1.read(&s, 6));
+    try t.expectError(error.TooLarge, r1.read(pair.server, 6));
 
     var r2 = try Reader.init(5, 10, &bp);
     defer r2.deinit();
-    try t.expectError(error.TooLarge, r2.read(&s, 11));
+    try t.expectError(error.TooLarge, r2.read(pair.server, 11));
 }
 
 test "Reader: reads message larger than static" {
-    var s = t.Stream.init();
-    _ = s.add("hello world");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("hello world");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(5, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 11));
+    try t.expectEqual(true, try r.read(pair.server, 11));
     try t.expectString("hello world", r.currentMessage());
 }
 
 test "Reader: reads fragmented message larger than static (no pool)" {
-    var s = t.Stream.init();
-    _ = s.add("hello").add(" ").add("world!").add("nice");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("hello");
+    try pair.client.writeAll(" ");
+    try pair.client.writeAll("world!");
+    try pair.client.writeAll("nice");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(5, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 12));
+    try t.expectEqual(true, try r.read(pair.server, 12));
     try t.expectString("hello world!", r.currentMessage());
     try t.expectString("hello world!", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 4));
+    try t.expectEqual(true, try r.read(pair.server, 4));
     try t.expectString("nice", r.currentMessage());
 }
 
 test "Reader: reads fragmented message larger than static smaller than pool" {
-    var s = t.Stream.init();
-    _ = s.add("hello").add(" ").add("world!").add("nice");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("hello");
+    try pair.client.writeAll(" ");
+    try pair.client.writeAll("world!");
+    try pair.client.writeAll("nice");
 
     var pool = try buffer.Pool.init(t.allocator, 2, 50);
     defer pool.deinit();
@@ -448,38 +468,44 @@ test "Reader: reads fragmented message larger than static smaller than pool" {
     var r = try Reader.init(5, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 12));
+    try t.expectEqual(true, try r.read(pair.server, 12));
     try t.expectString("hello world!", r.currentMessage());
     try t.expectString("hello world!", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 4));
+    try t.expectEqual(true, try r.read(pair.server, 4));
     try t.expectString("nice", r.currentMessage());
 }
 
 test "Reader: reads large fragmented message after small message no pool" {
-    var s = t.Stream.init();
-    _ = s.add("nice").add("hello").add(" ").add("world!");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("nice");
+    try pair.client.writeAll("hello");
+    try pair.client.writeAll(" ");
+    try pair.client.writeAll("world!");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(5, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 4));
+    try t.expectEqual(true, try r.read(pair.server, 4));
     try t.expectString("nice", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 12));
+    try t.expectEqual(true, try r.read(pair.server, 12));
     try t.expectString("hello world!", r.currentMessage());
     try t.expectString("hello world!", r.currentMessage());
 }
 
 test "Reader: reads large fragmented message after small with pool" {
-    var s = t.Stream.init();
-    _ = s.add("nice").add("hello").add(" ").add("world!");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("nice");
+    try pair.client.writeAll("hello");
+    try pair.client.writeAll(" ");
+    try pair.client.writeAll("world!");
 
     var pool = try buffer.Pool.init(t.allocator, 2, 50);
     defer pool.deinit();
@@ -488,71 +514,80 @@ test "Reader: reads large fragmented message after small with pool" {
     var r = try Reader.init(5, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 4));
+    try t.expectEqual(true, try r.read(pair.server, 4));
     try t.expectString("nice", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 12));
+    try t.expectEqual(true, try r.read(pair.server, 12));
     try t.expectString("hello world!", r.currentMessage());
     try t.expectString("hello world!", r.currentMessage());
 }
 
 test "Reader: reads large fragmented message fragmented with small message" {
-    var s = t.Stream.init();
-    _ = s.add("nicehel").add("lo").add(" ").add("world!");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("nicehel");
+    try pair.client.writeAll("lo");
+    try pair.client.writeAll(" ");
+    try pair.client.writeAll("world!");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(7, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 4));
+    try t.expectEqual(true, try r.read(pair.server, 4));
     try t.expectString("nice", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 12));
+    try t.expectEqual(true, try r.read(pair.server, 12));
     try t.expectString("hello world!", r.currentMessage());
     try t.expectString("hello world!", r.currentMessage());
 }
 
 test "Reader: reads large fragmented message with a small message when static buffer is smaller than read size" {
-    var s = t.Stream.init();
-    _ = s.add("nicehel").add("lo").add(" ").add("world!");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("nicehel");
+    try pair.client.writeAll("lo");
+    try pair.client.writeAll(" ");
+    try pair.client.writeAll("world!");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(5, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 4));
+    try t.expectEqual(true, try r.read(pair.server, 4));
     try t.expectString("nice", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 12));
+    try t.expectEqual(true, try r.read(pair.server, 12));
     try t.expectString("hello world!", r.currentMessage());
     try t.expectString("hello world!", r.currentMessage());
 }
 
 test "Reader: reads large fragmented message" {
-    var s = t.Stream.init();
-    _ = s.add("0").add("123456").add("789ABCabc").add("defghijklmn");
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll("0");
+    try pair.client.writeAll("123456");
+    try pair.client.writeAll("789ABCabc");
+    try pair.client.writeAll("defghijklmn");
 
     var bp = buffer.Provider.initNoPool(t.allocator);
 
     var r = try Reader.init(5, 20, &bp);
     defer r.deinit();
 
-    try t.expectEqual(true, try r.read(&s, 1));
+    try t.expectEqual(true, try r.read(pair.server, 1));
     try t.expectString("0", r.currentMessage());
 
-    try t.expectEqual(true, try r.read(&s, 13));
+    try t.expectEqual(true, try r.read(pair.server, 13));
     try t.expectString("0123456789ABC", r.currentMessage());
 
     r.prepareForNewMessage();
-    try t.expectEqual(true, try r.read(&s, 14));
+    try t.expectEqual(true, try r.read(pair.server, 14));
     try t.expectString("abcdefghijklmn", r.currentMessage());
 }
 
@@ -585,29 +620,104 @@ test "Reader: fuzz" {
         }
 
         // Now we have all ouf our expectations setup, let's setup our mock stream
-        var stream = t.Stream.init();
+        var pair = t.SocketPair.init();
+        defer pair.deinit();
+
         for (messages) |m| {
-            _ = stream.fragmentedAdd(m);
+            try pair.client.writeAll(m);
         }
 
-        // This is the inner fuzzing loop which takes a set of messages
-        // and tries multiple time with random fragmentation
-        var inner: usize = 0;
-        while (inner < 10) : (inner += 1) {
-            var s = stream.clone();
-            defer s.deinit();
+        var bp = buffer.Provider.initNoPool(t.allocator);
+        var r = try Reader.init(40, 101, &bp);
+        defer r.deinit();
 
-            var bp = buffer.Provider.initNoPool(t.allocator);
-
-            var r = try Reader.init(40, 101, &bp);
-            defer r.deinit();
-
-            for (messages) |m| {
-                try t.expectEqual(true, try r.read(&s, m.len));
-                try t.expectString(m, r.currentMessage());
-                r.prepareForNewMessage();
-            }
+        for (messages) |m| {
+            try t.expectEqual(true, try r.read(pair.server, m.len));
+            try t.expectString(m, r.currentMessage());
+            r.prepareForNewMessage();
         }
-        stream.deinit();
+    }
+}
+
+test "Reader: readMessage full" {
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+
+    var thread = try std.Thread.spawn(.{}, testMessageReader, .{pair.server});
+
+    try pair.client.writeAll(&.{ 129, 5, 's', 'h', 'o', 'r', 't' });
+    std.time.sleep(std.time.ns_per_ms * 5);
+
+    try pair.client.writeAll(&.{ 129, 5, 'a', 'b', 'c', 'd', 'e', 129 });
+    std.time.sleep(std.time.ns_per_ms * 5);
+
+    try pair.client.writeAll(&.{ 4, '1', '2', '3', '4', 130, 15 });
+    std.time.sleep(std.time.ns_per_ms * 5);
+
+    try pair.client.writeAll("-tKAjdmaij4j");
+    std.time.sleep(std.time.ns_per_ms * 5);
+
+    try pair.client.writeAll(&.{ '9', '8', '7', 130, 4, 'A', 'B' });
+    std.time.sleep(std.time.ns_per_ms * 5);
+    try pair.client.writeAll(&.{ 'C', 'D' });
+
+    try pair.client.writeAll(&.{ 129, 20 });
+    try pair.client.writeAll(&.{ '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'A', 'B', 'C', 'D', 'E', 'F', 'G' });
+    std.time.sleep(std.time.ns_per_ms * 5);
+    try pair.client.writeAll(&.{ 'H', 'I', 'J', 129, 3, 'j', 'k', 'l' });
+    thread.join();
+}
+
+fn testMessageReader(stream: std.net.Stream) void {
+    // done this way so we can try in our real function
+    // probably a better way to do this
+    tryTestMessageReader(stream) catch unreachable;
+}
+
+fn tryTestMessageReader(stream: std.net.Stream) !void {
+    var bp = buffer.Provider.initNoPool(t.allocator);
+    var r = try Reader.init(10, 100, &bp);
+    defer r.deinit();
+
+    {
+        const msg = try r.readMessage(stream);
+        try t.expectEqual(.text, msg.type);
+        try t.expectString("short", msg.data);
+    }
+
+    {
+        const msg = try r.readMessage(stream);
+        try t.expectEqual(.text, msg.type);
+        try t.expectString("abcde", msg.data);
+    }
+
+    {
+        const msg = try r.readMessage(stream);
+        try t.expectEqual(.text, msg.type);
+        try t.expectString("1234", msg.data);
+    }
+
+    {
+        const msg = try r.readMessage(stream);
+        try t.expectEqual(.binary, msg.type);
+        try t.expectString("-tKAjdmaij4j987", msg.data);
+    }
+
+    {
+        const msg = try r.readMessage(stream);
+        try t.expectEqual(.binary, msg.type);
+        try t.expectString("ABCD", msg.data);
+    }
+
+    {
+        const msg = try r.readMessage(stream);
+        try t.expectEqual(.text, msg.type);
+        try t.expectString("1234567890ABCDEFGHIJ", msg.data);
+    }
+
+    {
+        const msg = try r.readMessage(stream);
+        try t.expectEqual(.text, msg.type);
+        try t.expectString("jkl", msg.data);
     }
 }

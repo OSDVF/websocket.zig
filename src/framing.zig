@@ -10,39 +10,18 @@ pub const OpCode = enum(u8) {
 };
 
 pub fn mask(m: []const u8, payload: []u8) void {
-    @setRuntimeSafety(false);
-    const word_size = @sizeOf(usize);
-
-    // not point optimizing this if it's a really short payload
-    if (payload.len < word_size) {
-        simpleMask(m, payload);
-        return;
-    }
-
-    // We're going to xor this 1 word at a time.
-    // But, our payload's length probably isn't a perfect multiple of word_size
-    // so we'll first xor the bits until we have it aligned.
     var data = payload;
-    const over = data.len % word_size;
-
-    if (over > 0) {
-        simpleMask(m, data[0..over]);
-        data = data[over..];
+    const vector_size = std.simd.suggestVectorSize(u8) orelse @sizeOf(usize);
+    if (data.len >= vector_size) {
+        const mask_vector = std.simd.repeat(vector_size, @as(@Vector(4, u8), m[0..4].*));
+        while (data.len >= vector_size) {
+            const slice = data[0..vector_size];
+            const masked_data_slice: @Vector(vector_size, u8) = slice.*;
+            slice.* = masked_data_slice ^ mask_vector;
+            data = data[vector_size..];
+        }
     }
-
-    // shift the mask based on the # bytes we already unmasked in the above loop
-    var mask_template: [4]u8 = undefined;
-    for (0..4) |i| {
-        mask_template[i] = m[(i + over) & 3];
-    }
-
-    var i: usize = 0;
-    const mask_vector = std.simd.repeat(word_size, @as(@Vector(4, u8), mask_template[0..4].*));
-    while (i < data.len) : (i += word_size) {
-        const slice = data[i .. i + word_size][0..word_size];
-        const masked_data_slice: @Vector(word_size, u8) = slice.*;
-        slice.* = masked_data_slice ^ mask_vector;
-    }
+    simpleMask(m, data);
 }
 
 fn simpleMask(m: []const u8, payload: []u8) void {
@@ -59,12 +38,12 @@ pub fn frame(op_code: OpCode, comptime msg: []const u8) [frameLen(msg)]u8 {
     const len = msg.len;
     if (len <= 125) {
         framed[1] = @intCast(len);
-        std.mem.copy(u8, framed[2..], msg);
+        @memcpy(framed[2..], msg);
     } else if (len < 65536) {
         framed[1] = 126;
         framed[2] = @intCast((len >> 8) & 0xFF);
         framed[3] = @intCast(len & 0xFF);
-        std.mem.copy(u8, framed[4..], msg);
+        @memcpy(framed[4..], msg);
     } else {
         framed[1] = 127;
         framed[2] = @intCast((len >> 56) & 0xFF);
@@ -75,7 +54,7 @@ pub fn frame(op_code: OpCode, comptime msg: []const u8) [frameLen(msg)]u8 {
         framed[7] = @intCast((len >> 16) & 0xFF);
         framed[8] = @intCast((len >> 8) & 0xFF);
         framed[9] = @intCast(len & 0xFF);
-        std.mem.copy(u8, framed[10..], msg);
+        @memcpy(framed[10..], msg);
     }
     return framed;
 }
@@ -99,7 +78,7 @@ test "mask" {
     while (size < 1000) {
         const slice = original[0..size];
         random.bytes(slice);
-        std.mem.copy(u8, payload, slice);
+        @memcpy(payload[0..size], slice);
         mask(m[0..], payload[0..size]);
 
         for (slice, 0..) |b, i| {

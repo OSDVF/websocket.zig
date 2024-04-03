@@ -6,15 +6,12 @@ pub fn build(b: *std.Build) !void {
 
     _ = b.addModule("websocket", .{
         .source_file = .{ .path = "src/websocket.zig" },
-        .dependencies = &[_]std.build.ModuleDependency{
-            .{ .name = "zigtrait", .module = b.addModule("zigtrait", .{
-                .source_file = .{ .path = "src/zigtrait.zig" },
-            }) },
-        },
+        .target = target,
+        .optimize = optimize,
     });
 
     const lib_test = b.addTest(.{
-        .root_source_file = .{ .path = "src/websocket.zig" },
+        .source_file = .{ .path = "src/websocket.zig" },
         .target = target,
         .optimize = optimize,
     });

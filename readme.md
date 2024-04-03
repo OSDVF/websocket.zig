@@ -103,6 +103,19 @@ The call to `init` includes a `*websocket.Conn`. It is expected that handlers wi
 
 `conn.close()` can also be called to close the connection. Calling `conn.close()` **will** result in the handler's `close` callback being called.
 
+### Writer
+It's possible to get a `std.io.Writer` from a `*Conn`. Because websocket messages are framed, the writter will buffer the message in memory and requires an explicit "flush". Buffering will use the global buffer pool (described in the Config section), but can still result in dynamic allocations if the pool is empty or the message being written is larger than the configured max size.
+
+```zig
+// .text or .binary
+var wb = try conn.writeBuffer(.text);
+defer wb.deinit();
+
+try std.fmt.format(wb.writer(), "it's over {d}!!!", .{9000});
+
+try wb.flush();
+```
+
 ### Pings, Pongs and Close
 By default, the library answers incoming `ping` messages with a corresponging `pong`. Similarly, when a `close` message is received, a `close` reply is sent (as per the spec).
 
@@ -129,6 +142,7 @@ The 4th parameter to `websocket.listen` is a configuration object.
 * `max_size` - Maximum incoming message size to allow. The server will dynamically allocate up to this much space per request. Default: `65536`.
 * `buffer_size` - Size of the static buffer that's available per connection for incoming messages. While there's other overhead, the minimal memory usage of the server will be `# of active connections * buffer_size`. Default: `4096`.
 * `address` - Address to bind to. Default: `"127.0.0.1"`.
+* `unix_path` - Unix socket path to listen on (must be an absolute path). Mutually exclusive with address+port. Defaults: null
 * `handshake_pool_count` - The number of buffers to create and keep for reading the initial handshake. Default: `50`
 * `handshake_max_size` - The maximum size of the initial handshake to allow. Default: `1024`.
 * `max_headers` - The maximum size of headers to store in `handshake.headers`. Requests with more headers will still be processed, but `handshake.headers` will only contain the first `max_headers` headers. Default: `0`.
@@ -217,7 +231,10 @@ const Handler = struct {
     }
 
     pub fn connect(self: *Handler, path: []const u8) !void {
-        try self.client.handshake(path, .{.timeout_ms = 5000});
+        try self.client.handshake(path, .{
+            .timeout_ms = 5000
+            .headers = "Host: 127.0.0.1:9223",
+        });
         const thread = try self.client.readLoopInNewThread(self);
         thread.detach();
     }
@@ -253,7 +270,7 @@ pub fn main() !void {
 }
 ```
 
-The above is an example of how you might want to use `websocket.Client`. The link between the library's `websocket.Client` and your application's` `Handler` is very thin. Your handler will hold the client in order to write to the server and close the connection. But it is only the call to `client.readLoopInNewThread(HANDLER)` or `client.readLoop(HANDLER)` which connects the client to your handler.
+The above is an example of how you might want to use `websocket.Client`. The link between the library's `websocket.Client` and your application's `Handler` is very thin. Your handler will hold the client in order to write to the server and close the connection. But it is only the call to `client.readLoopInNewThread(HANDLER)` or `client.readLoop(HANDLER)` which connects the client to your handler.
 
 The above example could be rewritten to more cleanly separate the application's Handler and the library's Client:
 
@@ -262,7 +279,10 @@ var client = try websocket.connect(allocator, "localhost", 9001, .{});
 defer client.deinit();
 
 const path = "/";
-try client.handshake(path, .{.timeout_ms = 5000});
+try client.handshake(path, .{
+    .timeout_ms = 5000
+    .headers = "Host: localhost:9001",
+});
 
 const handler = Handler{.client = &client};
 const thread = try client.readLoopInNewThread(handler);

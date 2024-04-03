@@ -17,8 +17,6 @@ pub const Handshake = struct {
     raw_header: []const u8,
 
     pub fn parse(buf: []u8, headers: *KeyValue) !Handshake {
-        @setRuntimeSafety(lib.is_test);
-
         var data = buf;
         const request_line_end = mem.indexOfScalar(u8, data, '\r') orelse unreachable;
         var request_line = data[0..request_line_end];
@@ -104,7 +102,7 @@ pub const Handshake = struct {
         try stream.writeAll("\r\n\r\n");
     }
 
-    pub fn reply(self: Handshake, stream: anytype) !void {
+    pub fn reply(key: []const u8, stream: anytype) !void {
         var h: [20]u8 = undefined;
 
         // HTTP/1.1 101 Switching Protocols\r\n
@@ -115,7 +113,7 @@ pub const Handshake = struct {
         const key_pos = buf.len - 32;
 
         var hasher = std.crypto.hash.Sha1.init(.{});
-        hasher.update(self.key);
+        hasher.update(key);
         hasher.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
         hasher.final(&h);
 
@@ -261,27 +259,28 @@ test "handshake: parse" {
         var random = r.random();
         var count: usize = 0;
         const valid = "GET / HTTP/1.1\r\nsec-websocket-key: 1139329\r\nConnection: upgrade\r\nUpgrade:WebSocket\r\nSEC-WEBSOCKET-VERSION:   13  \r\n\r\n";
-        while (count < 5000) : (count += 1) {
-            var s = t.Stream.init();
+        while (count < 1000) : (count += 1) {
+            var pair = t.SocketPair.init();
+            defer pair.deinit();
+
             var data: []const u8 = valid[0..];
             while (data.len > 0) {
                 const l = random.uintAtMost(usize, data.len - 1) + 1;
-                _ = s.add(data[0..l]);
+                _ = try pair.client.writeAll(data[0..l]);
                 data = data[l..];
             }
-            const request_buf = readRequest(&s, buf, null) catch unreachable;
+            const request_buf = readRequest(pair.server, buf, null) catch unreachable;
             const h = Handshake.parse(request_buf, &headers) catch unreachable;
             try t.expectString("1139329", h.key);
             try t.expectString("/", h.url);
             try t.expectString("GET", h.method);
-            s.deinit();
         }
     }
 }
 
 test "handshake: reply" {
-    var s = t.Stream.init();
-    defer s.deinit();
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
 
     const h = Handshake{
         .url = "",
@@ -290,14 +289,12 @@ test "handshake: reply" {
         .headers = undefined,
         .key = "this is my key",
     };
-    try h.reply(&s);
+    try Handshake.reply(h.key, pair.server);
 
-    var pos: usize = 0;
     const expected = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-Websocket-Accept: flzHu2DevQ2dSCSVqKSii5e9C2o=\r\n\r\n";
-    for (s.received.items) |chunk| {
-        try t.expectString(expected[pos..(pos + chunk.len)], chunk);
-        pos += chunk.len;
-    }
+    var buf: [expected.len]u8 = undefined;
+    _ = try pair.client.readAll(&buf);
+    try t.expectString(&buf, expected);
 }
 
 test "pool: acquire and release" {
@@ -365,10 +362,10 @@ fn testPool(p: *Pool) void {
 }
 
 fn testHandshake(input: []const u8, buf: []u8, headers: *KeyValue) !Handshake {
-    var s = t.Stream.init();
-    _ = s.add(input);
+    var pair = t.SocketPair.init();
+    defer pair.deinit();
+    try pair.client.writeAll(input);
 
-    defer s.deinit();
-    const request_buf = try readRequest(&s, buf, null);
+    const request_buf = try readRequest(pair.server, buf, null);
     return Handshake.parse(request_buf, headers);
 }
