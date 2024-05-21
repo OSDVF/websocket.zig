@@ -10,7 +10,7 @@ const handshake = lib.handshake;
 const Reader = lib.Reader;
 const OpCode = framing.OpCode;
 
-const os = std.os;
+const posix = std.posix;
 const net = std.net;
 const Loop = std.event.Loop;
 const log = std.log.scoped(.websocket);
@@ -49,12 +49,11 @@ pub fn listen(comptime H: type, allocator: Allocator, context: anytype, config: 
         }
         break :blk try net.Address.parseIp(config.address, config.port);
     };
-    var listener = net.StreamServer.init(.{
+    var listener = try address.listen(.{
         .reuse_address = true,
         .kernel_backlog = 1024,
     });
     defer listener.deinit();
-    try listener.listen(address);
 
     if (no_delay) {
         // TODO: Broken on darwin:
@@ -62,35 +61,31 @@ pub fn listen(comptime H: type, allocator: Allocator, context: anytype, config: 
         // if (@hasDecl(os.TCP, "NODELAY")) {
         //  try os.setsockopt(socket.sockfd.?, os.IPPROTO.TCP, os.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
         // }
-        try os.setsockopt(listener.sockfd.?, os.IPPROTO.TCP, os.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
+        try posix.setsockopt(listener.stream.handle, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
     }
-    var read_timeout = std.mem.toBytes(os.timeval{
+    var read_timeout = std.mem.toBytes(posix.timeval{
         .tv_sec = @intCast(@divTrunc(2000, 1000)),
         .tv_usec = @intCast(@mod(0, 1000) * 1000),
     });
-    try os.setsockopt(listener.sockfd.?, os.SOL.SOCKET, os.SO.RCVTIMEO, &read_timeout);
-    try os.setsockopt(listener.sockfd.?, os.SOL.SOCKET, os.SO.SNDTIMEO, &read_timeout);
+    try posix.setsockopt(listener.stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &read_timeout);
+    try posix.setsockopt(listener.stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &read_timeout);
 
     var threads = std.ArrayListUnmanaged(std.Thread){};
     defer threads.deinit(allocator);
-    var connections = std.ArrayListUnmanaged(net.StreamServer.Connection){};
+    var connections = std.ArrayListUnmanaged(net.Server.Connection){};
     defer connections.deinit(allocator);
     while (running.*) {
-        if (listener.sockfd) |_| {
-            if (listener.accept()) |conn| {
-                const args = .{ &server, H, context, conn.stream };
-                try connections.append(allocator, conn);
-                try threads.append(allocator, try std.Thread.spawn(.{}, Server.accept, args));
-            } else |err| {
-                if (err != error.WouldBlock)
-                    log.err("failed to accept connection {}", .{err});
-            }
-        } else {
-            break;
+        if (listener.accept()) |conn| {
+            const args = .{ &server, H, context, conn.stream };
+            try connections.append(allocator, conn);
+            try threads.append(allocator, try std.Thread.spawn(.{}, Server.accept, args));
+        } else |err| {
+            if (err != error.WouldBlock)
+                log.err("failed to accept connection {}", .{err});
         }
     }
     for (connections.items) |*conn| {
-        if (std.os.system.fcntl(conn.stream.handle, std.os.F.GETFD) != -1)
+        if (std.posix.system.fcntl(conn.stream.handle, std.posix.F.GETFD) != -1)
             conn.stream.close();
     }
     for (threads.items) |*thread| {
@@ -471,7 +466,7 @@ pub const Conn = struct {
     };
 };
 
-const read_no_timeout = std.mem.toBytes(os.timeval{
+const read_no_timeout = std.mem.toBytes(posix.timeval{
     .tv_sec = 0,
     .tv_usec = 0,
 });
@@ -479,10 +474,10 @@ const read_no_timeout = std.mem.toBytes(os.timeval{
 // used in handshake tests
 pub fn readRequest(stream: anytype, buf: []u8, timeout: ?u32) ![]u8 {
     var deadline: ?i64 = null;
-    var read_timeout: ?[@sizeOf(os.timeval)]u8 = null;
+    var read_timeout: ?[@sizeOf(posix.timeval)]u8 = null;
     if (timeout) |ms| {
         // our timeout for each individual read
-        read_timeout = std.mem.toBytes(os.timeval{
+        read_timeout = std.mem.toBytes(posix.timeval{
             .tv_sec = @intCast(@divTrunc(ms, 1000)),
             .tv_usec = @intCast(@mod(ms, 1000) * 1000),
         });
@@ -497,7 +492,7 @@ pub fn readRequest(stream: anytype, buf: []u8, timeout: ?u32) ![]u8 {
         }
 
         if (read_timeout) |to| {
-            try os.setsockopt(stream.handle, os.SOL.SOCKET, os.SO.RCVTIMEO, &to);
+            try posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &to);
         }
 
         const n = try stream.read(buf[total..]);
@@ -508,7 +503,7 @@ pub fn readRequest(stream: anytype, buf: []u8, timeout: ?u32) ![]u8 {
         const request = buf[0..total];
         if (std.mem.endsWith(u8, request, "\r\n\r\n")) {
             if (read_timeout != null) {
-                try os.setsockopt(stream.handle, os.SOL.SOCKET, os.SO.RCVTIMEO, &read_no_timeout);
+                try posix.setsockopt(stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, &read_no_timeout);
             }
             return request;
         }
