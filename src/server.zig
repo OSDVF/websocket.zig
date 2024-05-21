@@ -34,7 +34,7 @@ pub const Config = struct {
     large_buffer_size: usize = 32768,
 };
 
-pub fn listen(comptime H: type, allocator: Allocator, context: anytype, config: Config, out_listener: *net.StreamServer) !void {
+pub fn listen(comptime H: type, allocator: Allocator, context: anytype, config: Config, running: *bool) !void {
     var server = try Server.init(allocator, config);
     defer server.deinit(allocator);
 
@@ -49,12 +49,12 @@ pub fn listen(comptime H: type, allocator: Allocator, context: anytype, config: 
         }
         break :blk try net.Address.parseIp(config.address, config.port);
     };
-    out_listener.* = net.StreamServer.init(.{
+    var listener = net.StreamServer.init(.{
         .reuse_address = true,
         .kernel_backlog = 1024,
     });
-    defer out_listener.deinit();
-    try out_listener.listen(address);
+    defer listener.deinit();
+    try listener.listen(address);
 
     if (no_delay) {
         // TODO: Broken on darwin:
@@ -62,17 +62,39 @@ pub fn listen(comptime H: type, allocator: Allocator, context: anytype, config: 
         // if (@hasDecl(os.TCP, "NODELAY")) {
         //  try os.setsockopt(socket.sockfd.?, os.IPPROTO.TCP, os.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
         // }
-        try os.setsockopt(out_listener.sockfd.?, os.IPPROTO.TCP, os.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
+        try os.setsockopt(listener.sockfd.?, os.IPPROTO.TCP, os.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
     }
+    var read_timeout = std.mem.toBytes(os.timeval{
+        .tv_sec = @intCast(@divTrunc(2000, 1000)),
+        .tv_usec = @intCast(@mod(0, 1000) * 1000),
+    });
+    try os.setsockopt(listener.sockfd.?, os.SOL.SOCKET, os.SO.RCVTIMEO, &read_timeout);
+    try os.setsockopt(listener.sockfd.?, os.SOL.SOCKET, os.SO.SNDTIMEO, &read_timeout);
 
-    while (true) {
-        if (out_listener.accept()) |conn| {
-            const args = .{ &server, H, context, conn.stream };
-            const thread = try std.Thread.spawn(.{}, Server.accept, args);
-            thread.detach();
-        } else |err| {
-            log.err("failed to accept connection {}", .{err});
+    var threads = std.ArrayListUnmanaged(std.Thread){};
+    defer threads.deinit(allocator);
+    var connections = std.ArrayListUnmanaged(net.StreamServer.Connection){};
+    defer connections.deinit(allocator);
+    while (running.*) {
+        if (listener.sockfd) |_| {
+            if (listener.accept()) |conn| {
+                const args = .{ &server, H, context, conn.stream };
+                try connections.append(allocator, conn);
+                try threads.append(allocator, try std.Thread.spawn(.{}, Server.accept, args));
+            } else |err| {
+                if (err != error.WouldBlock)
+                    log.err("failed to accept connection {}", .{err});
+            }
+        } else {
+            break;
         }
+    }
+    for (connections.items) |*conn| {
+        if (std.os.system.fcntl(conn.stream.handle, std.os.F.GETFD) != -1)
+            conn.stream.close();
+    }
+    for (threads.items) |*thread| {
+        thread.join();
     }
 }
 
@@ -167,7 +189,6 @@ pub const Server = struct {
 
     pub fn handle(self: *Server, comptime H: type, handler: *H, conn: *Conn) void {
         defer handler.close();
-        defer conn.stream.close();
 
         if (comptime std.meta.hasFn(H, "afterInit")) {
             handler.afterInit() catch return;
@@ -315,7 +336,7 @@ pub const Conn = struct {
         const handle_pong = self._handle_pong;
         const handle_close = self._handle_close;
 
-        while (true) {
+        while (!self.closed) {
             const message = reader.readMessage(stream) catch |err| {
                 switch (err) {
                     error.LargeControl => try stream.writeAll(CLOSE_PROTOCOL_ERROR),

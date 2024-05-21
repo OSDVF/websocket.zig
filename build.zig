@@ -11,10 +11,12 @@ pub fn build(b: *std.Build) !void {
     });
 
     const lib_test = b.addTest(.{
-        .source_file = .{ .path = "src/websocket.zig" },
+        .root_source_file = .{ .path = "src/websocket.zig" },
         .target = target,
         .optimize = optimize,
+        .test_runner = .{ .path = "test_runner.zig" },
     });
+
     const run_test = b.addRunArtifact(lib_test);
     run_test.has_side_effects = true;
 
