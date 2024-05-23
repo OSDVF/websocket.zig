@@ -85,12 +85,20 @@ pub fn listen(comptime H: type, allocator: Allocator, context: anytype, config: 
         }
     }
     for (connections.items) |*conn| {
-        if (std.posix.system.fcntl(conn.stream.handle, std.posix.F.GETFD) != -1)
+        if (fdIsValid(conn.stream.handle))
             conn.stream.close();
     }
     for (threads.items) |*thread| {
         thread.join();
     }
+}
+
+fn fdIsValid(fd: std.posix.socket_t) bool {
+    var zero: u32 = 0;
+    return if (builtin.os.tag == .windows)
+        std.os.windows.ws2_32.ioctlsocket(fd, std.os.linux.T.FIONREAD, &zero) != std.os.windows.ws2_32.SOCKET_ERROR
+    else
+        std.posix.system.fcntl(fd, std.posix.F.GETFD) != -1;
 }
 
 pub const Server = struct {
