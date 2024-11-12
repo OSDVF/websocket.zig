@@ -58,10 +58,9 @@ pub fn listen(comptime H: type, allocator: Allocator, context: anytype, config: 
     if (no_delay) {
         // TODO: Broken on darwin:
         // https://github.com/ziglang/zig/issues/17260
-        // if (@hasDecl(os.TCP, "NODELAY")) {
-        //  try os.setsockopt(socket.sockfd.?, os.IPPROTO.TCP, os.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
-        // }
-        try posix.setsockopt(listener.stream.handle, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
+        if (!@hasDecl(std.c, "TCP")) {
+            try posix.setsockopt(listener.stream.handle, std.os.linux.IPPROTO.TCP, std.os.linux.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
+        } else try posix.setsockopt(listener.stream.handle, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
     }
     var read_timeout = std.mem.toBytes(posix.timeval{
         .tv_sec = @intCast(@divTrunc(2000, 1000)),
