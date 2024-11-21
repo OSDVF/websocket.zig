@@ -1441,7 +1441,7 @@ fn _handleHandshake(comptime H: type, worker: anytype, hc: *HandlerConn(H), ctx:
     try conn.writeFramed(&Handshake.createReply(handshake.key));
 
     if (comptime std.meta.hasFn(H, "afterInit")) {
-        const params = @typeInfo(@TypeOf(H.afterInit)).@"fn".params;
+        const params = @typeInfo(@TypeOf(H.afterInit)).Fn.params;
         const res = if (params.len == 1) hc.handler.?.afterInit() else hc.handler.?.afterInit(ctx);
         res catch |err| {
             log.debug("({}) " ++ @typeName(H) ++ ".afterInit error: {}", .{ conn.address, err });
@@ -1493,7 +1493,7 @@ fn _handleClientData(comptime H: type, hc: *HandlerConn(H), allocator: Allocator
         log.debug("({}) received {s} message", .{ hc.conn.address, @tagName(message_type) });
         switch (message_type) {
             .text, .binary => {
-                const params = @typeInfo(@TypeOf(H.clientMessage)).@"fn".params;
+                const params = @typeInfo(@TypeOf(H.clientMessage)).Fn.params;
                 const needs_allocator = comptime needsAllocator(H);
 
                 var arena: std.heap.ArenaAllocator = undefined;
@@ -1597,7 +1597,7 @@ fn _handleClientData(comptime H: type, hc: *HandlerConn(H), allocator: Allocator
 }
 
 fn needsAllocator(comptime H: type) bool {
-    const params = @typeInfo(@TypeOf(H.clientMessage)).@"fn".params;
+    const params = @typeInfo(@TypeOf(H.clientMessage)).Fn.params;
     return comptime params[1].type == Allocator;
 }
 
@@ -1636,7 +1636,7 @@ fn preHandOffWrite(conn: *Conn, response: []const u8) void {
     }
 
     const socket = conn.stream.handle;
-    const timeout = std.mem.toBytes(posix.timeval{ .sec = 5, .usec = 0 });
+    const timeout = std.mem.toBytes(posix.timeval{ .tv_sec = 5, .tv_usec = 0 });
     posix.setsockopt(socket, posix.SOL.SOCKET, posix.SO.SNDTIMEO, &timeout) catch return;
 
     var pos: usize = 0;
@@ -1656,7 +1656,7 @@ fn timestamp() u32 {
     }
     var ts: posix.timespec = undefined;
     posix.clock_gettime(posix.CLOCK.REALTIME, &ts) catch unreachable;
-    return @intCast(ts.sec);
+    return @intCast(ts.tv_sec);
 }
 
 // intrusive doubly-linked list with count, not thread safe
@@ -1815,7 +1815,7 @@ test "Conn: close" {
 }
 
 fn testStream(handshake: bool) !net.Stream {
-    const timeout = std.mem.toBytes(std.posix.timeval{ .sec = 0, .usec = 20_000 });
+    const timeout = std.mem.toBytes(std.posix.timeval{ .tv_sec = 0, .tv_usec = 20_000 });
     const address = try std.net.Address.parseIp("127.0.0.1", 9292);
     const stream = try std.net.tcpConnectToAddress(address);
     try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &timeout);

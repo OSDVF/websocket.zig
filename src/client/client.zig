@@ -14,13 +14,13 @@ fn ReadLoopHandler(comptime T: type) type {
     const info = @typeInfo(T);
 
     switch (info) {
-        .@"struct" => |struct_info| {
+        .Struct => |struct_info| {
             if (struct_info.is_tuple)
                 @compileError("readLoop: handler does not support tuples.");
 
             return T;
         },
-        .pointer => |ptr_info| {
+        .Pointer => |ptr_info| {
             switch (ptr_info.size) {
                 .One => return ReadLoopHandler(ptr_info.child),
                 else => @compileError("readLoop: handler does not support Slice, C and Many pointers."),
@@ -78,10 +78,7 @@ pub const Client = struct {
             defer if (own_bundle) {
                 bundle.deinit(allocator);
             };
-            tls_client = try tls.Client.init(net_stream, .{
-                .host = .{ .explicit = config.host },
-                .ca = .{ .bundle = bundle },
-            });
+            tls_client = try tls.Client.init(net_stream, bundle, config.host);
         }
         const stream = Stream.init(net_stream, tls_client);
 
@@ -180,7 +177,7 @@ pub const Client = struct {
 
             switch (message_type) {
                 .text, .binary => {
-                    switch (comptime @typeInfo(@TypeOf(Handler.serverMessage)).@"fn".params.len) {
+                    switch (comptime @typeInfo(@TypeOf(Handler.serverMessage)).Fn.params.len) {
                         2 => try handler.serverMessage(message.data),
                         3 => try handler.serverMessage(message.data, if (message_type == .text) .text else .binary),
                         else => @compileError(@typeName(Handler) ++ ".serverMessage must accept 2 or 3 parameters"),
@@ -387,7 +384,7 @@ pub const Stream = struct {
         return self.stream.writeAll(data);
     }
 
-    const zero_timeout = std.mem.toBytes(posix.timeval{ .sec = 0, .usec = 0 });
+    const zero_timeout = std.mem.toBytes(posix.timeval{ .tv_sec = 0, .tv_usec = 0 });
     pub fn writeTimeout(self: *const Stream, ms: u32) !void {
         return self.setTimeout(posix.SO.SNDTIMEO, ms);
     }
@@ -402,8 +399,8 @@ pub const Stream = struct {
         }
 
         const timeout = std.mem.toBytes(posix.timeval{
-            .sec = @intCast(@divTrunc(ms, 1000)),
-            .usec = @intCast(@mod(ms, 1000) * 1000),
+            .tv_sec = @intCast(@divTrunc(ms, 1000)),
+            .tv_usec = @intCast(@mod(ms, 1000) * 1000),
         });
         return self.setsockopt(opt_name, &timeout);
     }
